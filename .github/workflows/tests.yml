@@ -10,5 +10,7 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: uv sync --group dev
+      - name: Standalone radial turbine self-tests
+        run: uv run python -I -S radial_turbine_preliminary.py --self-test
       - name: Run tests
         run: uv run pytest tests/ -v

@@ -2,6 +2,7 @@
 This tool is a streamline turbomachinery design tool solving the radial equilibrium equations. It can be used for designing compressors and turbines. The designs can have counter rotating stages, different working fluids, and cooling. The intent of this tool is to enable added flexibility in which loss models are used. Because it's a python, it can connect with custom machine learning based loss models.
 
 ## Table of Contents
+- [Standalone Radial Turbine Power Sizing](#standalone-radial-turbine-power-sizing)
 - [Key Features](#key-features)
 - [Code Structure](#code-structure)
   - [Core Solver Classes](#core-solver-classes)
@@ -28,6 +29,23 @@ This tool is a streamline turbomachinery design tool solving the radial equilibr
   - [CI/CD for Documentation](#cicd-for-documentation)
 - [Contributors](#contributors)
 - [License](#license)
+
+## Standalone Radial Turbine Power Sizing
+
+`radial_turbine_preliminary.py` sizes an ideal-gas radial-inflow turbine for a
+specified aerodynamic power at fixed mass flow. It minimizes rotor inlet diameter
+within fixed meanline closures, subject to a maximum RPM and configurable exit
+geometry limits. It requires only Python 3.9 or newer and the standard library.
+
+```sh
+python radial_turbine_preliminary.py --example
+python radial_turbine_preliminary.py --input minimum_diameter_input.json --output results.json
+python radial_turbine_preliminary.py --self-test
+```
+
+Edit `required_power_W`, `mdot`, and `rpm_max` in the example JSON for your
+operating requirement. See [the usage notes](docs/radial-turbine-preliminary.md)
+for the sizing equations, input assumptions, Python API, and model limitations.
 
 ## Key Features
 - Streamline-based radial equilibrium solver for axial and radial turbomachinery
