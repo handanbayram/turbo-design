@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone preliminary aerodynamic design of an ideal-gas radial turbine.
+"""Standalone minimum-diameter preliminary design of an ideal-gas radial turbine.
 
 Run with Python >= 3.9; only the standard library is required::
 
@@ -13,6 +13,7 @@ The API is design_turbine(DesignInputs(...)) -> DesignResult. Import is silent.
 JSON input is a flat object using the DesignInputs field names below. Operating
 requirements are mandatory; omitted gas/loss/closure fields use documented
 defaults. Unknown fields, booleans, strings and nonfinite numbers are rejected.
+The alternative sizing fields required_power_W and speed_ratio accept null.
 
 Model and conventions
 ---------------------
@@ -34,7 +35,8 @@ Input / unknown / closure table
 -------------------------------
 Inputs                        Unknowns                      Closure
 p0_in, T0_in, p_exit           ideal expansion, spouting C0  ideal-gas isentrope
-rpm, speed_ratio              U_1, inlet radius r_1         U_1 = speed_ratio*C0
+rpm, required_power_W          U_1, inlet radius r_1         Euler power, U_1 = omega*r_1
+speed_ratio (alternative)      U_1, inlet radius r_1         U_1 = speed_ratio*C0
 inlet_flow_coefficient         C_m1                          C_m1 = coefficient*U_1
 beta_1_deg                    W_theta1, C_theta1            inlet relative angle
 nozzle_loss                   p_1, p0_1, T_1                adiabatic nozzle loss
@@ -43,12 +45,26 @@ rotor_loss, p_exit             T_2, W_2, C_m2                rothalpy, loss, C_t
 mdot, inlet/exit_blockage      areas, b_1, exit hub/tip       continuity and RMS annulus
 R=287.15, gamma=1.4            cp, cv, density, sound speed  calorically perfect gas
 
-The bundled choices (speed_ratio=.65, inlet_flow_coefficient=.30,
-beta_1_deg=0, exit_radius_ratio=.50, losses=.05/.10, blockage=.03/.03)
-are adjustable assumptions, not optimized or validated correlations. Power is
-an output, not an additional constraint. At fixed operating pressures, inlet
-triangle and speed ratio, Euler work (and therefore eta_ts) is fixed. Increasing
-loss consumes exit kinetic energy and changes eta_tt, geometry and feasibility;
+The bundled example requires 100000 W at .5 kg/s and 60000 RPM. It solves for
+the minimum rotor inlet diameter with those operating requirements and the
+prescribed inlet triangle held fixed. With phi=inlet_flow_coefficient,
+k=1+phi*tan(beta_1), and zero absolute exit swirl, Euler power is
+P=mdot*k*U_1^2=mdot*k*(omega*D_1/2)^2. For k>0 this increases strictly with
+D_1, so the exact power match is the diameter lower bound for P>=required_power_W.
+The recovered thermodynamics and annulus must also be feasible; otherwise the
+exact power requirement is rejected with an error. No overproduction is assumed.
+This is a constrained algebraic minimum, not a search over RPM, mass flow,
+flow coefficient, inlet angle, exit radius ratio, losses or blockage. Without
+fixed RPM and inlet-triangle choices there is no such diameter guarantee.
+
+Specify either required_power_W or speed_ratio, never both. Omitting both
+preserves the legacy speed_ratio=.65 forward calculation, where power is an
+output. The other bundled choices (inlet_flow_coefficient=.30, beta_1_deg=0,
+exit_radius_ratio=.50, losses=.05/.10, blockage=.03/.03) are adjustable
+assumptions, not optimized or validated correlations. At fixed operating
+pressures, inlet triangle and speed ratio, Euler work (and therefore eta_ts)
+is fixed. Increasing loss consumes exit kinetic energy and changes eta_tt,
+geometry and feasibility;
 it does not independently change the already prescribed work. Loss coefficients
 are in [0,1):
 Yn = (p0_in-p0_1)/(p0_in-p_1);
@@ -136,16 +152,18 @@ RT-19 DERIVED  RT-15/13: strict geometric upper mass-flow bound (not choking).
 RT-20 DERIVED  RT-06/16 and turbine_spool.py::overall_pressure_ratio:
                report expansion ratios, ideal drops and power in SI units.
 RT-21 DERIVED  RT-14/15: diameter, heights and geometric radius ratios.
+RT-22 DERIVED  RT-05/07/16: invert Euler power for the minimum inlet diameter
+               at fixed mdot, RPM and inlet triangle; validate exact power match.
 
 Development verification snapshot
 ---------------------------------
 Bundled air design: 400000 Pa / 1000 K supply, 100000 Pa exit, .5 kg/s,
-60000 RPM. Aerodynamic power 138872.931693 W; eta_ts=.845000000,
-eta_tt=.960225949; inlet diameter .167754 m, b_1=.006832 m;
-exit hub/tip radii .034495/.048247 m. Representative residuals: both mass
-flows -5.55e-17 kg/s, rothalpy 0 J/kg, enthalpy minus Euler power -2.91e-11 W,
-static versus relative rotor entropy difference 5.68e-14 J/(kg K). Last digits
-can vary by interpreter/platform. Independent development-only comparisons
+60000 RPM, required aerodynamic power 100000 W. Solved speed ratio .551574976;
+eta_ts=.608469908, eta_tt=.927257062; minimum inlet diameter .142353 m,
+b_1=.008361 m; exit hub/tip radii .030492/.040041 m. Representative residuals:
+inlet mass flow 0 kg/s, rothalpy 0 J/kg, enthalpy minus Euler power 4.37e-11 W,
+power-target error 4.37e-11 W. Last digits can vary by interpreter/platform.
+Original forward-mode development-only comparisons
 matched 16 nozzle/rotor state properties against the actual stator_calc and
 rotor_calc functions, plus IsenP, IsenT, FindMachP0P and the zero-swirl exit
 area_for_massflow. Those original modules are never imported by this file.
@@ -158,6 +176,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 import json
 import math
 import sys
+from typing import Optional
 import unittest
 
 
@@ -229,10 +248,11 @@ class DesignInputs:
     rotor_loss: float = 0.10
     inlet_blockage: float = 0.03
     exit_blockage: float = 0.03
-    speed_ratio: float = 0.65
+    speed_ratio: Optional[float] = None
     inlet_flow_coefficient: float = 0.30
     beta_1_deg: float = 0.0
     exit_radius_ratio: float = 0.50
+    required_power_W: Optional[float] = None
 
     @classmethod
     def from_dict(cls, data):
@@ -248,10 +268,17 @@ class DesignInputs:
 
     def validate(self):
         for name, value in asdict(self).items():
+            if name in ("speed_ratio", "required_power_W") and value is None:
+                continue
             finite(name, value)
-        for name in ("p0_in", "T0_in", "p_exit", "mdot", "rpm", "speed_ratio",
+        for name in ("p0_in", "T0_in", "p_exit", "mdot", "rpm",
                      "inlet_flow_coefficient", "exit_radius_ratio"):
             positive(name, getattr(self, name))
+        for name in ("speed_ratio", "required_power_W"):
+            if getattr(self, name) is not None:
+                positive(name, getattr(self, name))
+        if self.required_power_W is not None and self.speed_ratio is not None:
+            raise DesignError("specify either required_power_W or speed_ratio, not both")
         for name in ("nozzle_loss", "rotor_loss", "inlet_blockage", "exit_blockage"):
             fraction(name, getattr(self, name))
         if self.p_exit >= self.p0_in:
@@ -263,7 +290,7 @@ class DesignInputs:
 
 
 EXAMPLE_INPUT = DesignInputs(p0_in=400000.0, T0_in=1000.0, p_exit=100000.0,
-                             mdot=0.5, rpm=60000.0)
+                             mdot=0.5, rpm=60000.0, required_power_W=100000.0)
 
 
 @dataclass(frozen=True)
@@ -343,7 +370,14 @@ class DesignResult:
             "station_1": "radial nozzle exit / rotor inlet",
             "station_2": "axial rotor exit; zero absolute swirl",
             "total_state_notation": "0 in p0/T0 means stagnation; rel is the local rotor frame",
-            "selected_closures": ["speed_ratio", "inlet_flow_coefficient", "beta_1_deg",
+            "sizing_mode": ("minimum inlet diameter for required aerodynamic power"
+                            if self.inputs.required_power_W is not None
+                            else "prescribed speed ratio; power is an output"),
+            "diameter_minimum_scope": ("fixed mdot, rpm and all other design closures; exact power match"
+                                       if self.inputs.required_power_W is not None else "not applied"),
+            "selected_closures": [("required_power_W" if self.inputs.required_power_W is not None
+                                   else "speed_ratio (default .65 if omitted)"),
+                                  "inlet_flow_coefficient", "beta_1_deg",
                                   "exit_radius_ratio", "zero absolute exit swirl"],
             "computed_dimensions": "geometry; hub/tip ratio is an output",
             "assumptions": ["steady adiabatic uncooled single stage", "constant ideal-gas R and gamma",
@@ -536,17 +570,22 @@ def exit_annulus(area, r_mean, r_inlet):
 
 
 def design_turbine(inputs: DesignInputs) -> DesignResult:
-    """Size one stage algebraically; no filesystem, imports, or CLI side effects.
+    """Size one stage, minimizing inlet diameter when required_power_W is given.
 
     Raises DesignError for an invalid input, an infeasible closure/geometry, or
     an unresolved physical balance. Dimensions are sized for the requested mdot;
     changing mdot designs a new flowpath rather than predicting off-design flow.
+    Power sizing holds RPM and the other closures fixed and replaces speed_ratio
+    with an exact Euler-power match. No filesystem, imports, or CLI side effects.
     """
     if not isinstance(inputs, DesignInputs):
         raise DesignError("inputs must be a DesignInputs instance")
     try:
         return _design_turbine(inputs)
-    except DesignError:
+    except DesignError as exc:
+        if inputs.required_power_W is not None:
+            raise DesignError(f"required-power design is infeasible with the specified operating "
+                              f"point and fixed design choices: {exc}") from exc
         raise
     except (OverflowError, ZeroDivisionError, ValueError) as exc:
         raise DesignError("inputs produce an unrepresentable floating-point state; "
@@ -569,7 +608,26 @@ def _design_turbine(x):
     # Reference commit: 4be23d16d82d7d7264821f038937ba233cac7204
     # No original correlation is claimed for the selected closure values.
     omega = positive("omega", x.rpm * math.pi / 30)
-    U_1 = positive("U_1", x.speed_ratio * c0)
+    if x.required_power_W is None:
+        speed_ratio = 0.65 if x.speed_ratio is None else x.speed_ratio
+        U_1 = positive("U_1", speed_ratio * c0)
+    else:
+        # Equation RT-22 [DERIVED]
+        # Source: RT-05/07 inlet triangle and RT-16 Euler power above;
+        # turbodesign/flow_math.py::compute_power, turbine_math.py::rotor_calc.
+        # Reference commit: 4be23d16d82d7d7264821f038937ba233cac7204
+        # C_theta1=U1*(1+phi*tan(beta1)), C_theta2=0 => P=mdot*k*U1^2.
+        # For fixed positive mdot, RPM and k, P increases strictly with D1^2.
+        # Thus U1=sqrt(P_required/(mdot*k)) gives the smallest diameter that
+        # can supply the required power. Retain all downstream feasibility checks.
+        k = positive("inlet loading factor 1+phi*tan(beta_1)",
+                     1 + x.inlet_flow_coefficient * math.tan(math.radians(x.beta_1_deg)))
+        specific_work = positive("required specific work", x.required_power_W / x.mdot)
+        if specific_work >= dh_is_ts:
+            raise DesignError("required_power_W must be below mdot times the ideal "
+                              "total-to-static enthalpy drop (finite exit kinetic energy and losses)")
+        U_1 = positive("U_1 for required power", math.sqrt(specific_work / k))
+        speed_ratio = positive("solved speed_ratio", U_1 / c0)
     r_1 = positive("r_1", U_1 / omega)
     C_m1 = positive("C_m1", x.inlet_flow_coefficient * U_1)
     beta_1 = math.radians(x.beta_1_deg)
@@ -590,7 +648,7 @@ def _design_turbine(x):
     C_m2_sq = W_2_sq - U_2**2
     if not math.isfinite(C_m2_sq) or C_m2_sq <= 0:
         raise DesignError(f"impossible exit velocity: C_m2^2={C_m2_sq:g} m^2/s^2 "
-                          f"with speed_ratio={x.speed_ratio:g}, rotor_loss={x.rotor_loss:g}, "
+                          f"with speed_ratio={speed_ratio:g}, rotor_loss={x.rotor_loss:g}, "
                           f"exit_radius_ratio={x.exit_radius_ratio:g}; reduce speed_ratio/rotor_loss "
                           "or revise the inlet triangle/exit pressure")
     s2 = make_station(gas, r_2, T_2, x.p_exit, math.sqrt(C_m2_sq), 0.0, U_2)
@@ -688,6 +746,12 @@ def _design_turbine(x):
         "entropy additivity": residuals["entropy_additivity_J_kg_K"]/gas.cp,
         "entropy frame identity": residuals["rotor_entropy_frames_J_kg_K"]/gas.cp,
     }
+    if x.required_power_W is not None:
+        # RT-22: independently check the target using the recovered enthalpy drop,
+        # rather than only the Euler expression used to select the diameter.
+        residuals["power_target_W"] = power_h - x.required_power_W
+        residuals["power_target_relative"] = residuals["power_target_W"] / x.required_power_W
+        checks["required power"] = residuals["power_target_relative"]
     for name, residual in checks.items():
         if not math.isfinite(residual) or abs(residual) > 1e-9:
             raise DesignError(f"{name} consistency check failed: normalized residual={residual:g}")
@@ -698,6 +762,7 @@ def _design_turbine(x):
     # Report existing ideal drops and aerodynamic work/power without mechanical factors.
     performance = {
         "omega_rad_s": omega, "spouting_speed_m_s": c0,
+        "speed_ratio": speed_ratio,
         "ideal_drop_ts_J_kg": dh_is_ts, "ideal_drop_tt_J_kg": dh_is_tt,
         "specific_work_enthalpy_J_kg": work_h, "specific_work_euler_J_kg": work_e,
         "aerodynamic_power_W": power_h, "euler_power_W": power_e,
@@ -739,6 +804,10 @@ def format_report(result):
              f"Exit hub/tip radii: {g.exit_hub_radius:.6f} / {g.exit_tip_radius:.6f} m",
              "Throat choking: unevaluated (no throat geometry). Mechanical losses omitted.",
              "Prescribed-loss meanline model; flowpath sizing and approximate zero-deviation angles only."]
+    if result.inputs.required_power_W is not None:
+        lines.insert(1, f"Required aerodynamic power: {result.inputs.required_power_W/1000:.4f} kW; "
+                     "minimum inlet diameter at fixed mass flow, RPM and inlet triangle.")
+        lines.insert(3, f"Solved speed ratio U_1/C0: {p['speed_ratio']:.6f}")
     for section, values in d.items():
         lines.append(f"\n{section}:")
         for name, value in values.items():
@@ -754,8 +823,72 @@ class SelfTests(unittest.TestCase):
     """Independent identities and failure modes, runnable outside the repository."""
 
     def setUp(self):
-        self.x = EXAMPLE_INPUT
+        self.x = replace(EXAMPLE_INPUT, required_power_W=None, speed_ratio=.65)
         self.r = design_turbine(self.x)
+
+    def test_required_power_and_minimum_diameter(self):
+        for beta in (-10, 0, 10):
+            with self.subTest(beta=beta):
+                x = replace(EXAMPLE_INPUT, beta_1_deg=beta)
+                r = design_turbine(x)
+                self.assertAlmostEqual(r.performance["aerodynamic_power_W"], x.required_power_W)
+                self.assertAlmostEqual(r.performance["euler_power_W"], x.required_power_W)
+                self.assertLess(abs(r.residuals["power_target_relative"]), 1e-10)
+                # Independently integrate meanline torque: P=omega*mdot*r1*C_theta1.
+                torque = x.mdot*r.geometry.inlet_radius*r.station_1.C_theta
+                self.assertAlmostEqual(torque*x.rpm*math.pi/30, x.required_power_W)
+                # Re-solve both sides of the candidate with the forward model.
+                # Every smaller D lowers power for the fixed inlet triangle.
+                for factor in (.99, 1.01):
+                    other = design_turbine(replace(
+                        x, required_power_W=None, speed_ratio=r.performance["speed_ratio"]*factor))
+                    self.assertAlmostEqual(other.geometry.inlet_diameter/r.geometry.inlet_diameter,
+                                           factor)
+                    self.assertEqual(other.performance["aerodynamic_power_W"] < x.required_power_W,
+                                     factor < 1)
+
+    def test_required_power_scaling_and_fixed_rpm(self):
+        r = design_turbine(EXAMPLE_INPUT)
+        high = design_turbine(replace(EXAMPLE_INPUT, required_power_W=120000))
+        fast = design_turbine(replace(EXAMPLE_INPUT, rpm=72000))
+        self.assertAlmostEqual(high.geometry.inlet_diameter/r.geometry.inlet_diameter, math.sqrt(1.2))
+        self.assertAlmostEqual(fast.geometry.inlet_diameter/r.geometry.inlet_diameter, 1/1.2)
+        self.assertEqual(fast.inputs.rpm, 72000)
+        self.assertAlmostEqual(fast.performance["aerodynamic_power_W"], EXAMPLE_INPUT.required_power_W)
+        self.assertAlmostEqual(fast.station_1.U, r.station_1.U)
+        self.assertAlmostEqual(fast.station_2.T, r.station_2.T)
+
+    def test_infeasible_required_power(self):
+        ideal_power = self.x.mdot*ideal_enthalpy_drop(
+            Gas(), self.x.T0_in, self.x.p0_in, self.x.p_exit)
+        for power, message in ((ideal_power, "ideal"), (2*ideal_power, "ideal"),
+                               (160000, "impossible exit"), (1000, "hub")):
+            with self.subTest(power=power), self.assertRaisesRegex(DesignError, message):
+                design_turbine(replace(EXAMPLE_INPUT, required_power_W=power))
+        with self.assertRaisesRegex(DesignError, "inlet loading factor"):
+            design_turbine(replace(EXAMPLE_INPUT, beta_1_deg=-89))
+
+    def test_required_power_input_validation(self):
+        for power in (0, -1, True, "100000", float("nan"), float("inf")):
+            with self.subTest(power=power), self.assertRaisesRegex(DesignError, "required_power_W"):
+                design_turbine(replace(EXAMPLE_INPUT, required_power_W=power))
+        with self.assertRaisesRegex(DesignError, "either required_power_W or speed_ratio"):
+            design_turbine(replace(EXAMPLE_INPUT, speed_ratio=.65))
+
+    def test_required_power_json_and_legacy_default(self):
+        x = DesignInputs.from_dict(json.loads(json.dumps(asdict(EXAMPLE_INPUT))))
+        r = design_turbine(x)
+        data = json.loads(json.dumps(r.to_dict(), allow_nan=False))
+        self.assertEqual(data["inputs"]["required_power_W"], 100000)
+        self.assertIsNone(data["inputs"]["speed_ratio"])
+        self.assertAlmostEqual(data["performance"]["speed_ratio"],
+                               r.station_1.U/r.performance["spouting_speed_m_s"])
+        self.assertIn("minimum inlet diameter", data["metadata"]["sizing_mode"])
+        legacy_data = asdict(self.x)
+        del legacy_data["speed_ratio"], legacy_data["required_power_W"]
+        legacy = design_turbine(DesignInputs.from_dict(legacy_data))
+        self.assertEqual(legacy.geometry, self.r.geometry)
+        self.assertEqual(legacy.performance, self.r.performance)
 
     def test_gas_and_independent_total_static_reference(self):
         gas = Gas()
